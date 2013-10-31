@@ -64,28 +64,30 @@ def find_node_ip_in_network(network, nodeish=nil)
 end
 
 def get_mon_addresses()
-  mon_ips = []
+  mon_ips = get_quorum_members_ips()
+  if mon_ips.nil?
+    mon_ips = get_mon_ips_by_role()
+  end
+  return mon_ips
+end
 
-  if File.exists?("/var/run/ceph/ceph-mon.#{node['hostname']}.asok")
-    mon_ips = get_quorum_members_ips()
+def get_mon_ips_by_role()
+  mons = []
+  # make sure if this node runs ceph-mon, it's always included even if
+  # search is laggy; put it first in the hopes that clients will talk
+  # primarily to local node
+  if node['roles'].include? 'ceph-mon'
+    mons << node
+  end
+
+  mons += get_mon_nodes()
+  if is_crowbar?
+    mon_ips = mons.map { |node| Chef::Recipe::Barclamp::Inventory.get_network_by_type(node, "admin").address }
   else
-    mons = []
-    # make sure if this node runs ceph-mon, it's always included even if
-    # search is laggy; put it first in the hopes that clients will talk
-    # primarily to local node
-    if node['roles'].include? 'ceph-mon'
-      mons << node
-    end
-
-    mons += get_mon_nodes()
-    if is_crowbar?
-      mon_ips = mons.map { |node| Chef::Recipe::Barclamp::Inventory.get_network_by_type(node, "admin").address }
+    if node['ceph']['config']['global'] && node['ceph']['config']['global']['public network']
+      mon_ips = mons.map { |nodeish| find_node_ip_in_network(node['ceph']['config']['global']['public network'], nodeish) }
     else
-      if node['ceph']['config']['global'] && node['ceph']['config']['global']['public network']
-        mon_ips = mons.map { |nodeish| find_node_ip_in_network(node['ceph']['config']['global']['public network'], nodeish) }
-      else
-        mon_ips = mons.map { |node| node['ipaddress'] + ":6789" }
-      end
+      mon_ips = mons.map { |node| node['ipaddress'] + ":6789" }
     end
   end
   return mon_ips.uniq
@@ -96,7 +98,11 @@ def get_quorum_members_ips()
   mon_status = %x[ceph --admin-daemon /var/run/ceph/ceph-mon.#{node['hostname']}.asok mon_status]
   raise 'getting quorum members failed' unless $?.exitstatus == 0
 
-  mons = JSON.parse(mon_status)['monmap']['mons']
+  mon_status_parsed = JSON.parse(mon_status)
+  if mon_status_parsed['monmap']['epoch'] == 0
+    return nil
+  end
+  mons = mon_status_parsed['monmap']['mons']
   mons.each do |k|
     mon_ips.push(k['addr'][0..-3])
   end
